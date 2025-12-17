@@ -1,0 +1,501 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>通用病历生成器 (自助版)</title>
+    
+    <!-- React & ReactDOM -->
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    
+    <!-- Babel for JSX -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <!-- html2pdf.js -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
+
+    <!-- Font Awesome -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@300;400;500;700&display=swap');
+        
+        /* 1. 允许页面整体纵向滚动，只禁止横向 */
+        body, html {
+            width: 100%;
+            margin: 0;
+            padding: 0;
+            overflow-x: hidden; 
+        }
+
+        body {
+            font-family: 'Noto Sans SC', sans-serif;
+            background-color: #f3f4f6;
+        }
+
+        /* A4 Paper Style - 不使用 transform scale */
+        .a4-paper {
+            width: 210mm;
+            min-height: 297mm; 
+            padding: 20mm;
+            background: white;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.1);
+            position: relative;
+            display: block; 
+            height: auto; 
+            overflow: visible;
+        }
+
+        /* Custom scrollbar */
+        .custom-scroll::-webkit-scrollbar {
+            width: 6px;
+            height: 6px;
+        }
+        .custom-scroll::-webkit-scrollbar-track {
+            background: #f1f1f1;
+        }
+        .custom-scroll::-webkit-scrollbar-thumb {
+            background: #ccc;
+            border-radius: 3px;
+        }
+
+        /* Print Styles */
+        @media print {
+            body * { visibility: hidden; }
+            #print-area, #print-area * { visibility: visible; }
+            #print-area {
+                position: absolute;
+                left: 0;
+                top: 0;
+                width: 100%;
+                transform: none !important;
+                margin: 0 !important;
+            }
+        }
+        
+        /* 缩放容器 - 使用 zoom 而非 transform */
+        .zoom-wrapper {
+            display: inline-block;
+        }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useRef, useEffect } = React;
+
+        const emptyData = {
+            baseInfo: { name: "", gender: "", age: "", maritalStatus: "", history: "", familyHistory: "", geneticTest: "" },
+            surgeries: [],
+            treatments: [],
+            images: []
+        };
+
+        const demoData = {
+            baseInfo: {
+                name: "张某某",
+                gender: "女",
+                age: "45",
+                maritalStatus: "已婚",
+                history: "无高血压、糖尿病史",
+                familyHistory: "母亲有乳腺癌病史",
+                geneticTest: "BRCA1/2 (-)"
+            },
+            surgeries: [
+                {
+                    id: Date.now(),
+                    date: "2024-01-15",
+                    title: "左乳肿块切除术",
+                    content: "（左乳肿块）浸润性导管癌，II级，切缘阴性。",
+                    note: "ER(+), PR(+), HER2(1+), Ki-67(20%)"
+                }
+            ],
+            treatments: [
+                { id: Date.now() + 1, time: "2024-02-01", title: "化疗", detail: "TC方案 x 4周期" }
+            ],
+            images: [
+                {
+                    id: Date.now() + 2,
+                    date: "2024-06-01",
+                    type: "乳腺超声",
+                    finding: "双侧乳腺腺体层回声增强，结构紊乱。左乳术区未见明显积液及实性占位。",
+                    conclusion: "左乳术后改变，BI-RADS 2类。"
+                }
+            ]
+        };
+
+        function App() {
+            const [data, setData] = useState(emptyData);
+            const [isGenerating, setIsGenerating] = useState(false);
+            const [zoom, setZoom] = useState(1);
+            const reportRef = useRef();
+            const wrapperRef = useRef();
+
+            // --- 1. 初始缩放逻辑：手机默认 52% ---
+            useEffect(() => {
+                const handleResize = () => {
+                    const width = window.innerWidth;
+                    if (width < 640) setZoom(0.52);
+                    else if (width < 1024) setZoom(0.7);
+                    else setZoom(1);
+                };
+                handleResize();
+                window.addEventListener('resize', handleResize);
+                return () => window.removeEventListener('resize', handleResize);
+            }, []);
+
+            // --- 缩放控制 ---
+            const handleZoomIn = () => setZoom(prev => Math.min(prev + 0.05, 2.0));
+            const handleZoomOut = () => setZoom(prev => Math.max(prev - 0.05, 0.3));
+
+            // --- Handlers ---
+            const handleBaseInfoChange = (e) => {
+                const { name, value } = e.target;
+                setData(prev => ({ ...prev, baseInfo: { ...prev.baseInfo, [name]: value } }));
+            };
+
+            const handleListChange = (section, index, field, value) => {
+                const newList = [...data[section]];
+                newList[index][field] = value;
+                setData(prev => ({ ...prev, [section]: newList }));
+            };
+
+            const addListItem = (section, initialItem) => {
+                setData(prev => ({ ...prev, [section]: [...prev[section], { ...initialItem, id: Date.now() }] }));
+            };
+
+            const removeListItem = (section, index) => {
+                if(!confirm("确定要删除这条记录吗？")) return;
+                const newList = [...data[section]];
+                newList.splice(index, 1);
+                setData(prev => ({ ...prev, [section]: newList }));
+            };
+
+            const loadDemo = () => {
+                if(confirm("这将覆盖当前内容，确定加载演示数据吗？")) setData(demoData);
+            };
+
+            const clearAll = () => {
+                if(confirm("确定清空所有内容吗？")) setData(emptyData);
+            };
+
+            // --- PDF Download (Clone Method) ---
+            const downloadPDF = () => {
+                setIsGenerating(true);
+                const originalElement = reportRef.current;
+                const clonedElement = originalElement.cloneNode(true);
+                
+                const container = document.createElement('div');
+                container.style.position = 'fixed';
+                container.style.top = '-10000px';
+                container.style.left = '-10000px';
+                container.style.width = '210mm'; 
+                container.style.zIndex = '-1';
+                
+                clonedElement.style.transform = 'none'; 
+                clonedElement.style.zoom = '1';
+                clonedElement.style.margin = '0';
+                clonedElement.style.height = 'auto';
+                
+                container.appendChild(clonedElement);
+                document.body.appendChild(container);
+                
+                const opt = {
+                    margin: [10, 0, 10, 0], 
+                    filename: `${data.baseInfo.name || '患者'}_病历汇总.pdf`,
+                    image: { type: 'jpeg', quality: 0.98 },
+                    html2canvas: { scale: 2, useCORS: true, scrollY: 0 },
+                    jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' },
+                    pagebreak: { mode: ['css', 'legacy'] }
+                };
+
+                html2pdf().set(opt).from(clonedElement).save().then(() => {
+                    document.body.removeChild(container);
+                    setIsGenerating(false);
+                }).catch(err => {
+                    console.error(err);
+                    document.body.removeChild(container);
+                    setIsGenerating(false);
+                    alert("生成失败，请重试");
+                });
+            };
+
+            return (
+                <div className="flex flex-col lg:flex-row min-h-screen">
+                    
+                    {/* 左侧/上方编辑器 */}
+                    <div className="w-full lg:w-1/3 bg-white border-r border-gray-200 flex flex-col h-screen no-print shadow-xl z-10 sticky top-0">
+                        {/* 顶部工具栏 */}
+                        <div className="p-4 border-b border-gray-200 bg-gray-50 flex justify-between items-center shrink-0">
+                            <h2 className="text-lg font-bold text-gray-800"><i className="fas fa-pen-to-square mr-2"></i>病历录入</h2>
+                            <div className="space-x-2">
+                                <button onClick={loadDemo} className="text-xs text-blue-600 hover:underline">加载演示</button>
+                                <button onClick={clearAll} className="text-xs text-red-600 hover:underline">清空</button>
+                            </div>
+                        </div>
+
+                        {/* 滚动编辑区域 */}
+                        <div className="flex-1 overflow-y-auto p-4 custom-scroll space-y-6 bg-gray-50">
+                            {/* 1. 基本信息 */}
+                            <div className="bg-white p-4 rounded-lg shadow-sm border border-gray-100">
+                                <h3 className="font-semibold text-blue-800 border-b pb-2 mb-3 flex items-center">
+                                    <span className="bg-blue-100 text-blue-800 text-xs px-2 py-1 rounded mr-2">1</span> 基本信息
+                                </h3>
+                                <div className="grid grid-cols-2 gap-3 mb-3">
+                                    <input className="border p-2 rounded text-sm focus:ring-2 ring-blue-100 outline-none transition" name="name" placeholder="姓名" value={data.baseInfo.name} onChange={handleBaseInfoChange} />
+                                    <input className="border p-2 rounded text-sm focus:ring-2 ring-blue-100 outline-none transition" name="gender" placeholder="性别" value={data.baseInfo.gender} onChange={handleBaseInfoChange} />
+                                    <input className="border p-2 rounded text-sm focus:ring-2 ring-blue-100 outline-none transition" name="age" placeholder="年龄" value={data.baseInfo.age} onChange={handleBaseInfoChange} />
+                                    <input className="border p-2 rounded text-sm focus:ring-2 ring-blue-100 outline-none transition" name="maritalStatus" placeholder="婚育状况" value={data.baseInfo.maritalStatus} onChange={handleBaseInfoChange} />
+                                </div>
+                                <div className="space-y-3">
+                                    <input className="w-full border p-2 rounded text-sm focus:ring-2 ring-blue-100 outline-none transition" name="history" placeholder="既往史 (如：无高血压、糖尿病史)" value={data.baseInfo.history} onChange={handleBaseInfoChange} />
+                                    <input className="w-full border p-2 rounded text-sm focus:ring-2 ring-blue-100 outline-none transition" name="familyHistory" placeholder="家族史" value={data.baseInfo.familyHistory} onChange={handleBaseInfoChange} />
+                                    <textarea className="w-full border p-2 rounded text-sm focus:ring-2 ring-blue-100 outline-none transition" name="geneticTest" placeholder="基因检测结果" value={data.baseInfo.geneticTest} onChange={handleBaseInfoChange} rows="2" />
+                                </div>
+                            </div>
+
+                            {/* 2. 手术/病理 */}
+                            <div className="bg-white p-4 rounded-lg shadow-sm border border-gray-100">
+                                <h3 className="font-semibold text-blue-800 border-b pb-2 mb-3 flex justify-between items-center">
+                                    <span><span className="bg-blue-100 text-blue-800 text-xs px-2 py-1 rounded mr-2">2</span> 手术与病理</span>
+                                </h3>
+                                <div className="space-y-4">
+                                    {data.surgeries.map((item, idx) => (
+                                        <div key={item.id} className="relative bg-gray-50 p-3 rounded border border-gray-200 group">
+                                            <button onClick={() => removeListItem('surgeries', idx)} className="absolute top-2 right-2 text-gray-400 hover:text-red-500 opacity-0 group-hover:opacity-100 transition"><i className="fas fa-trash-alt"></i></button>
+                                            <div className="grid grid-cols-3 gap-2 mb-2">
+                                                <input className="col-span-1 border p-1 rounded text-xs" placeholder="日期" value={item.date} onChange={(e) => handleListChange('surgeries', idx, 'date', e.target.value)} />
+                                                <input className="col-span-2 border p-1 rounded text-xs" placeholder="手术名称" value={item.title} onChange={(e) => handleListChange('surgeries', idx, 'title', e.target.value)} />
+                                            </div>
+                                            <textarea className="w-full border p-1 rounded text-xs mb-2 font-mono" rows="4" placeholder="病理诊断..." value={item.content} onChange={(e) => handleListChange('surgeries', idx, 'content', e.target.value)} />
+                                            <textarea className="w-full border p-1 rounded text-xs font-mono bg-gray-100" rows="2" placeholder="补充信息..." value={item.note} onChange={(e) => handleListChange('surgeries', idx, 'note', e.target.value)} />
+                                        </div>
+                                    ))}
+                                    <button onClick={() => addListItem('surgeries', { date: "", title: "", content: "", note: "" })} className="w-full py-2 border-2 border-dashed border-gray-300 text-gray-500 rounded hover:border-blue-400 hover:text-blue-500 transition text-sm">
+                                        <i className="fas fa-plus mr-1"></i> 添加记录
+                                    </button>
+                                </div>
+                            </div>
+
+                            {/* 3. 治疗经过 */}
+                            <div className="bg-white p-4 rounded-lg shadow-sm border border-gray-100">
+                                <h3 className="font-semibold text-blue-800 border-b pb-2 mb-3 flex items-center">
+                                    <span className="bg-blue-100 text-blue-800 text-xs px-2 py-1 rounded mr-2">3</span> 治疗经过
+                                </h3>
+                                <div className="space-y-2">
+                                    {data.treatments.map((item, idx) => (
+                                        <div key={item.id} className="flex gap-2 items-center group">
+                                            <input className="w-24 border p-1 rounded text-xs shrink-0" placeholder="时间" value={item.time} onChange={(e) => handleListChange('treatments', idx, 'time', e.target.value)} />
+                                            <input className="w-24 border p-1 rounded text-xs shrink-0" placeholder="类型" value={item.title} onChange={(e) => handleListChange('treatments', idx, 'title', e.target.value)} />
+                                            <input className="flex-grow border p-1 rounded text-xs" placeholder="具体方案" value={item.detail} onChange={(e) => handleListChange('treatments', idx, 'detail', e.target.value)} />
+                                            <button onClick={() => removeListItem('treatments', idx)} className="text-gray-300 hover:text-red-500 px-1 opacity-0 group-hover:opacity-100"><i className="fas fa-times"></i></button>
+                                        </div>
+                                    ))}
+                                    <button onClick={() => addListItem('treatments', { time: "", title: "", detail: "" })} className="w-full py-2 border-2 border-dashed border-gray-300 text-gray-500 rounded hover:border-blue-400 hover:text-blue-500 transition text-sm mt-2">
+                                        <i className="fas fa-plus mr-1"></i> 添加记录
+                                    </button>
+                                </div>
+                            </div>
+
+                            {/* 4. 影像检查 */}
+                            <div className="bg-white p-4 rounded-lg shadow-sm border border-gray-100 mb-8">
+                                <h3 className="font-semibold text-blue-800 border-b pb-2 mb-3 flex items-center">
+                                    <span className="bg-blue-100 text-blue-800 text-xs px-2 py-1 rounded mr-2">4</span> 影像学检查
+                                </h3>
+                                <div className="space-y-4">
+                                    {data.images.map((item, idx) => (
+                                        <div key={item.id} className="relative bg-gray-50 p-3 rounded border border-gray-200 group">
+                                            <button onClick={() => removeListItem('images', idx)} className="absolute top-2 right-2 text-gray-400 hover:text-red-500 opacity-0 group-hover:opacity-100 transition"><i className="fas fa-trash-alt"></i></button>
+                                            <div className="grid grid-cols-2 gap-2 mb-2">
+                                                <input className="border p-1 rounded text-xs" placeholder="检查日期" value={item.date} onChange={(e) => handleListChange('images', idx, 'date', e.target.value)} />
+                                                <input className="border p-1 rounded text-xs" placeholder="项目" value={item.type} onChange={(e) => handleListChange('images', idx, 'type', e.target.value)} />
+                                            </div>
+                                            <textarea className="w-full border p-1 rounded text-xs mb-2" rows="3" placeholder="所见..." value={item.finding} onChange={(e) => handleListChange('images', idx, 'finding', e.target.value)} />
+                                            <textarea className="w-full border p-1 rounded text-xs bg-blue-50" rows="2" placeholder="结论..." value={item.conclusion} onChange={(e) => handleListChange('images', idx, 'conclusion', e.target.value)} />
+                                        </div>
+                                    ))}
+                                    <button onClick={() => addListItem('images', { date: "", type: "", finding: "", conclusion: "" })} className="w-full py-2 border-2 border-dashed border-gray-300 text-gray-500 rounded hover:border-blue-400 hover:text-blue-500 transition text-sm">
+                                        <i className="fas fa-plus mr-1"></i> 添加记录
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+
+                        {/* 底部下载栏 */}
+                        <div className="p-4 border-t border-gray-200 bg-white shrink-0 shadow-inner">
+                            <button 
+                                onClick={downloadPDF}
+                                disabled={isGenerating}
+                                className="w-full bg-blue-600 hover:bg-blue-700 text-white font-medium py-3 rounded shadow flex items-center justify-center transition disabled:opacity-50 disabled:cursor-not-allowed"
+                            >
+                                {isGenerating ? <span className="animate-spin mr-2"><i className="fas fa-spinner"></i></span> : <i className="fas fa-file-pdf mr-2"></i>}
+                                导出 PDF 文件
+                            </button>
+                        </div>
+                    </div>
+
+                    {/* 右侧/下方预览区 */}
+                    <div className="w-full lg:w-2/3 bg-gray-200 p-8 overflow-y-auto overflow-x-hidden h-screen custom-scroll relative">
+                        
+                        {/* 缩放控制器 */}
+                        <div className="fixed lg:absolute bottom-4 right-4 z-50 flex flex-col gap-2 no-print opacity-90 hover:opacity-100 transition">
+                            <button onClick={handleZoomIn} className="w-10 h-10 bg-white rounded-full shadow-lg text-gray-600 hover:text-blue-600 flex items-center justify-center transition hover:bg-gray-50 active:scale-95 border border-gray-200">
+                                <i className="fas fa-plus"></i>
+                            </button>
+                            <div className="bg-white/90 backdrop-blur px-2 py-1 rounded text-xs text-center shadow font-mono text-gray-600 select-none border border-gray-200">
+                                {Math.round(zoom * 100)}%
+                            </div>
+                            <button onClick={handleZoomOut} className="w-10 h-10 bg-white rounded-full shadow-lg text-gray-600 hover:text-blue-600 flex items-center justify-center transition hover:bg-gray-50 active:scale-95 border border-gray-200">
+                                <i className="fas fa-minus"></i>
+                            </button>
+                        </div>
+
+                        {/* 居中容器 */}
+                        <div className="flex justify-center">
+                            {/* 缩放包装器 - 使用 CSS zoom 属性 */}
+                            <div 
+                                ref={wrapperRef}
+                                className="zoom-wrapper"
+                                style={{ zoom: zoom }}
+                            >
+                                {/* A4 纸张 */}
+                                <div id="print-area" ref={reportRef} className="a4-paper text-sm leading-relaxed text-gray-800">
+                                    
+                                    <div className="pt-2"></div>
+
+                                    {/* Section 1: Base Info */}
+                                    <div className="mb-6 print-item">
+                                        <h2 className="text-base font-bold bg-gray-100 p-1 pl-2 mb-3 border-l-4 border-blue-800">1. 患者基本信息</h2>
+                                        <table className="w-full border-collapse border border-gray-300 text-sm">
+                                            <tbody>
+                                                <tr>
+                                                    <td className="border border-gray-300 p-2 bg-gray-50 w-24 font-semibold">姓名</td>
+                                                    <td className="border border-gray-300 p-2 w-1/4">{data.baseInfo.name}</td>
+                                                    <td className="border border-gray-300 p-2 bg-gray-50 w-24 font-semibold">性别/年龄</td>
+                                                    <td className="border border-gray-300 p-2">{data.baseInfo.gender} {data.baseInfo.age ? `/ ${data.baseInfo.age}岁` : ''}</td>
+                                                    <td className="border border-gray-300 p-2 bg-gray-50 w-24 font-semibold">婚育状况</td>
+                                                    <td className="border border-gray-300 p-2">{data.baseInfo.maritalStatus}</td>
+                                                </tr>
+                                                <tr>
+                                                    <td className="border border-gray-300 p-2 bg-gray-50 font-semibold">既往史</td>
+                                                    <td className="border border-gray-300 p-2" colSpan="5">{data.baseInfo.history}</td>
+                                                </tr>
+                                                <tr>
+                                                    <td className="border border-gray-300 p-2 bg-gray-50 font-semibold">家族史</td>
+                                                    <td className="border border-gray-300 p-2" colSpan="5">{data.baseInfo.familyHistory}</td>
+                                                </tr>
+                                                <tr>
+                                                    <td className="border border-gray-300 p-2 bg-gray-50 font-semibold">基因检测</td>
+                                                    <td className="border border-gray-300 p-2 text-blue-700 font-medium" colSpan="5">{data.baseInfo.geneticTest}</td>
+                                                </tr>
+                                            </tbody>
+                                        </table>
+                                    </div>
+
+                                    {/* Section 2: Pathology */}
+                                    <div className="mb-6">
+                                        <h2 className="text-base font-bold bg-gray-100 p-1 pl-2 mb-3 border-l-4 border-blue-800">2. 手术与病理记录</h2>
+                                        <div className="space-y-6">
+                                            {data.surgeries.length === 0 && <p className="text-gray-400 italic text-center py-4">暂无手术记录</p>}
+                                            {data.surgeries.map((surgery, index) => (
+                                                <div key={index} className="border border-gray-200 rounded p-4 shadow-sm bg-white print-item">
+                                                    <div className="flex justify-between border-b border-gray-100 pb-2 mb-3">
+                                                        <span className="font-bold text-blue-900 text-base">{surgery.date}</span>
+                                                        <span className="font-semibold text-gray-700">{surgery.title}</span>
+                                                    </div>
+                                                    <div className="grid grid-cols-1 gap-3">
+                                                        <div>
+                                                            <span className="text-xs font-bold text-gray-500 mb-1 block">
+                                                                <i className="fas fa-microscope mr-1 text-blue-500"></i>病理诊断
+                                                            </span>
+                                                            <div className="whitespace-pre-wrap font-medium text-gray-800 leading-6 pl-2 border-l-4 border-blue-200">
+                                                                {surgery.content}
+                                                            </div>
+                                                        </div>
+                                                        
+                                                        {surgery.note && (
+                                                            <div className="mt-2 bg-gray-50 p-3 rounded border border-gray-100">
+                                                                <span className="text-xs font-bold text-gray-500 block mb-1">补充信息 / 免疫组化：</span>
+                                                                <p className="text-xs text-gray-700 whitespace-pre-wrap leading-relaxed tracking-wide break-words">{surgery.note}</p>
+                                                            </div>
+                                                        )}
+                                                    </div>
+                                                </div>
+                                            ))}
+                                        </div>
+                                    </div>
+
+                                    {/* Section 3: Treatment */}
+                                    <div className="mb-6 pt-4 print-item">
+                                        <h2 className="text-base font-bold bg-gray-100 p-1 pl-2 mb-3 border-l-4 border-blue-800">3. 治疗经过</h2>
+                                        {data.treatments.length === 0 ? (
+                                            <p className="text-gray-400 italic text-center py-4 border border-dashed border-gray-300 rounded">暂无治疗记录</p>
+                                        ) : (
+                                            <table className="w-full border-collapse border border-gray-300 text-sm shadow-sm">
+                                                <thead className="bg-gray-50">
+                                                    <tr>
+                                                        <th className="border border-gray-300 p-2 text-left w-1/4">时间</th>
+                                                        <th className="border border-gray-300 p-2 text-left w-1/4">治疗方式</th>
+                                                        <th className="border border-gray-300 p-2 text-left">具体方案</th>
+                                                    </tr>
+                                                </thead>
+                                                <tbody>
+                                                    {data.treatments.map((t, i) => (
+                                                        <tr key={i}>
+                                                            <td className="border border-gray-300 p-2">{t.time}</td>
+                                                            <td className="border border-gray-300 p-2 font-medium">{t.title}</td>
+                                                            <td className="border border-gray-300 p-2">{t.detail}</td>
+                                                        </tr>
+                                                    ))}
+                                                </tbody>
+                                            </table>
+                                        )}
+                                    </div>
+
+                                    {/* Section 4: Imaging */}
+                                    <div className="mb-4">
+                                        <h2 className="text-base font-bold bg-gray-100 p-1 pl-2 mb-3 border-l-4 border-blue-800">4. 影像学检查汇总</h2>
+                                        <div className="space-y-6">
+                                            {data.images.length === 0 && <p className="text-gray-400 italic text-center py-4 border border-dashed border-gray-300 rounded">暂无影像记录</p>}
+                                            {data.images.map((img, i) => (
+                                                <div key={i} className="flex text-xs border-b border-gray-200 pb-4 last:border-0 print-item">
+                                                    <div className="w-24 flex-shrink-0 font-bold text-gray-600 pt-1">
+                                                        {img.date}<br/>
+                                                        <span className="text-blue-600">{img.type}</span>
+                                                    </div>
+                                                    <div className="flex-grow pl-4">
+                                                        <div className="mb-2">
+                                                            <span className="font-semibold block text-gray-700 mb-1">[所见]</span>
+                                                            <p className="whitespace-pre-wrap leading-relaxed text-justify">{img.finding}</p>
+                                                        </div>
+                                                        <div className="text-gray-800 bg-gray-50 p-2 rounded border border-gray-100">
+                                                            <span className="font-semibold block text-gray-700 mb-1">[提示/结论]</span>
+                                                            <p className="whitespace-pre-wrap">{img.conclusion}</p>
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                            ))}
+                                        </div>
+                                    </div>
+
+                                </div>
+                            </div>
+                        </div>
+                        
+                        {/* 底部留白 - 允许滚动到PDF底部到达预览区顶部 */}
+                        <div style={{ height: '100vh' }}></div>
+                    </div>
+                </div>
+            );
+        }
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
